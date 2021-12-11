@@ -1,0 +1,18 @@
+{
+  "name": "surfer-grid-file-format",
+  "version": "0.0.1",
+  "description": "Surfer grid (.grd) file format reading and writing implementation",
+  "main": "index.js",
+  "scripts": {
+    "test": "mocha test/**/*.js"
+  },
+  "devDependencies": {
+    "mocha": "^9.0.0"
+  },
+  "author": "apdevelop",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/apdevelop/surfer-grid-file-format"
+  }
+}
