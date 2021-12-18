@@ -2,7 +2,7 @@
 
 ### Surfer grid (.grd) file format implementation for Node.js.
 
-Surfer grid (.grd) file format reading and writing very basic implementation for Node.js.
+Surfer 6 grid (.grd) file formats (text and binary) implementation (reading and writing) for Node.js, without runtime dependencies.
 
 ### Usage
 
@@ -12,13 +12,12 @@ Run in this repo folder to create tarball package
 `npm pack`
 
 Run in application folder
-`npm install <path/to/surfer-grid-file-format-0.0.1.tgz>`
-
+`npm install <path/to/surfer-grid-file-format-0.1.0.tgz>`
 
 ```javascript
 var Grid = require('surfer-grid-file-format');
 
-// Creating from two-dimensional array
+// Creating grid from two-dimensional array
 var grid = new Grid([
     [0, 1, 1, null],
     [2, 3, 5, 1],
@@ -30,11 +29,11 @@ console.log(grid.rowCount()); // => 3
 console.log(grid.columnCount()); // => 4
 console.log(grid.blankedNodesCount()); // => 1
 
-// Reading from file
-var grid1 = new Grid().readSync('./input.grd'); // Chained method call
+// Writing to file
+grid.writeSync('./out.grd', Grid.BINARY);
 
-// Write to file
-grid.writeSync('./out.grd');
+// Reading from file
+var gridFromFile = new Grid().readSync('./input.grd'); // Chained method call
 ```
 
 ### API

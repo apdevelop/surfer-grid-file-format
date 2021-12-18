@@ -1,6 +1,6 @@
 {
   "name": "surfer-grid-file-format",
-  "version": "0.0.1",
+  "version": "0.1.0",
   "description": "Surfer grid (.grd) file format reading and writing implementation",
   "main": "index.js",
   "scripts": {
