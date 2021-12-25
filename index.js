@@ -8,7 +8,9 @@ const TEXT_FORMAT_IDENTIFICATION_STRING = 'DSAA'; // Surfer 6 Text Grid File For
 
 const BINARY_FORMAT_IDENTIFICATION_STRING = 'DSBB'; // Surfer 6 Binary Grid File Format
 
-const TEXT_DELIMITER = ' '; // The fields within ASCII grid files must be space or tab delimited
+const SURFER7_FORMAT_IDENTIFICATION_STRING = 'DSRB'; // Surfer 7 Grid File Format
+
+const TEXT_DELIMITER = ' '; // The fields within text grid files must be space or tab delimited
 
 const TEXT_DELIMITER_SPACE_OR_TAB = / |\t/;
 
@@ -18,14 +20,40 @@ const NO_DATA_VALUE_STRING = '1.70141e+038';
 
 const NO_DATA_VALUE_HEX = 0x7effffee; // NO DATA special value in 32bit floating point format
 
-/** Creates and returns grid object. */
-function Grid(data, xmin, ymin, xmax, ymax) {
+const NO_DATA_VALUE_DOUBLE_RAW = '47dffffdbd19d02c';
+
+const SIZE_LONG = 4; // 32 bit signed integer
+
+const SIZE_FLOAT = 4; // 32 bit single precision floating point value
+
+const SIZE_DOUBLE = 8; // 64 bit double precision floating point value
+
+const SURFER7_SECTION_HEADER = 0x42525344;
+
+const SURFER7_SECTION_GRID = 0x44495247;
+
+const SURFER7_SECTION_DATA = 0x41544144;
+
+const SURFER7_SECTION_FAULT_INFO = 0x49544c46;
+
+/** 
+ * Creates and returns grid object.
+ * @param data Grid data matrix - 2D array of Z values.
+ * @param xmin X coordinate of the lower left corner of the grid.
+ * @param ymin Y coordinate of the lower left corner of the grid.
+ * @param xmax X coordinate of the upper right corner of the grid.
+ * @param ymax Y coordinate of the upper right corner of the grid.
+ * @param rotation Rotation angle of the grid.
+ * */
+function Grid(data, xmin, ymin, xmax, ymax, rotation) {
     if (typeof data === 'undefined') {
         this.data = null;
         this.xmin = null;
         this.ymin = null;
         this.xmax = null;
         this.ymax = null;
+        this.rotation = null;
+        this.blankValue = null;
     }
     else {
         // TODO: validate input with messages
@@ -43,6 +71,8 @@ function Grid(data, xmin, ymin, xmax, ymax) {
         this.ymin = ymin;
         this.xmax = xmax;
         this.ymax = ymax;
+        this.rotation = (typeof rotation === 'undefined') ? 0 : rotation;
+        this.blankValue = new Buffer(NO_DATA_VALUE_DOUBLE_RAW, 'hex').readDoubleLE(0);
     }
 }
 
@@ -90,17 +120,17 @@ Grid.prototype.getMinMax = function () {
  * @param path Path to the grid file.
  * */
 Grid.prototype.readSync = function (path) {
-    const FormatSize = 4;
+    const FORMAT_SIZE = 4;
 
     let file = fs.openSync(path, 'r');
-    let formatBuffer = Buffer.alloc(FormatSize);
-    fs.readSync(file, formatBuffer, 0, FormatSize, 0);
-    let format = formatBuffer.toString('latin1', 0, FormatSize);
+    let formatBuffer = Buffer.alloc(FORMAT_SIZE);
+    fs.readSync(file, formatBuffer, 0, formatBuffer.length, 0);
+    let format = formatBuffer.toString('latin1', 0, formatBuffer.length);
 
     if (format === TEXT_FORMAT_IDENTIFICATION_STRING) {
         let fileSize = fs.statSync(path).size;
-        let dataBuffer = Buffer.alloc(fileSize - FormatSize);
-        fs.readSync(file, dataBuffer, 0, dataBuffer.length, FormatSize);
+        let dataBuffer = Buffer.alloc(fileSize - FORMAT_SIZE);
+        fs.readSync(file, dataBuffer, 0, dataBuffer.length, FORMAT_SIZE);
         let lines = dataBuffer.toString('latin1').split(TEXT_NEWLINE);
 
         // TODO: read line by line
@@ -120,6 +150,8 @@ Grid.prototype.readSync = function (path) {
         this.ymax = parseFloat(arr[1]);
 
         // TODO: ? skip zmin, zmax
+
+        this.rotation = 0;
 
         let row = 0;
         let column = 0;
@@ -150,11 +182,10 @@ Grid.prototype.readSync = function (path) {
         fs.closeSync(file);
     }
     else if (format === BINARY_FORMAT_IDENTIFICATION_STRING) {
-        const FLOAT_SIZE = 4;
         const HeaderSize = 2 * 2 + 6 * 8;
 
         let headerBuffer = Buffer.alloc(HeaderSize);
-        fs.readSync(file, headerBuffer, 0, HeaderSize, FormatSize);
+        fs.readSync(file, headerBuffer, 0, HeaderSize, FORMAT_SIZE);
 
         let columnCount = headerBuffer.readInt16LE(0);
         let rowCount = headerBuffer.readInt16LE(2);
@@ -166,13 +197,15 @@ Grid.prototype.readSync = function (path) {
         this.ymax = headerBuffer.readDoubleLE(28);
 
         // TODO: ? skip zmin, zmax
-        let position = FormatSize + HeaderSize;
-        let rowBuffer = Buffer.alloc(columnCount * FLOAT_SIZE);
+        this.rotation = 0;
+
+        let position = FORMAT_SIZE + HeaderSize;
+        let rowBuffer = Buffer.alloc(columnCount * SIZE_FLOAT);
 
         // TODO: validate input data
         for (let row = 0; row < rowCount; row++) {
-            let num = fs.readSync(file, rowBuffer, 0, columnCount * FLOAT_SIZE, position);
-            if (num !== columnCount * FLOAT_SIZE) {
+            let num = fs.readSync(file, rowBuffer, 0, rowBuffer.length, position);
+            if (num !== rowBuffer.length) {
                 fs.closeSync(file);
                 throw new Error(`Error reading row ${row}/${rowCount}, unexpected end of file`);
             }
@@ -180,20 +213,120 @@ Grid.prototype.readSync = function (path) {
             this.data.push([]);
             for (let column = 0; column < columnCount; column++) {
                 // Avoiding rounding errors when compare
-                let value = rowBuffer.readUInt32LE(column * FLOAT_SIZE) === NO_DATA_VALUE_HEX ?
+                let value = rowBuffer.readUInt32LE(column * SIZE_FLOAT) === NO_DATA_VALUE_HEX ?
                     null :
-                    rowBuffer.readFloatLE(column * FLOAT_SIZE);
+                    rowBuffer.readFloatLE(column * SIZE_FLOAT);
 
                 this.data[row].push(value);
             }
 
-            position += columnCount * FLOAT_SIZE;
+            position += rowBuffer.length;
         }
 
         fs.closeSync(file);
     }
+    else if (format === SURFER7_FORMAT_IDENTIFICATION_STRING) {
+        let position = FORMAT_SIZE;
+
+        // Header Section
+        let sizeBuffer = Buffer.alloc(SIZE_LONG);
+        fs.readSync(file, sizeBuffer, 0, sizeBuffer.length, position);
+        let headerSectionSize = sizeBuffer.readInt32LE(0);
+        position += sizeBuffer.length;
+
+        let headerSectionBuffer = Buffer.alloc(headerSectionSize);
+        fs.readSync(file, headerSectionBuffer, 0, headerSectionBuffer.length, position);
+        let version = headerSectionBuffer.readInt32LE(0); // 1 or 2
+        position += headerSectionBuffer.length; // TODO: use Version
+
+        let tagBuffer = Buffer.alloc(SIZE_LONG * 2); // Tag structure
+
+        let rowCount = 0;
+        let columnCount = 0;
+        this.blankValue = new Buffer(NO_DATA_VALUE_DOUBLE_RAW, 'hex').readDoubleLE(0);
+
+        for (; ;) {
+            // Each section is preceded by a tag structure
+            fs.readSync(file, tagBuffer, 0, tagBuffer.length, position);
+            position += tagBuffer.length;
+
+            let sectionId = tagBuffer.readUInt32LE(0);
+            let sectionSize = tagBuffer.readInt32LE(SIZE_LONG);
+            if (sectionId === SURFER7_SECTION_GRID) {
+                // Grid Section
+                let gridSectionBuffer = Buffer.alloc(sectionSize);
+                fs.readSync(file, gridSectionBuffer, 0, gridSectionBuffer.length, position);
+                position += sectionSize;
+
+                let offset = 0;
+                rowCount = gridSectionBuffer.readInt32LE(offset);
+                offset += SIZE_LONG;
+                columnCount = gridSectionBuffer.readInt32LE(offset);
+                offset += SIZE_LONG;
+                this.xmin = gridSectionBuffer.readDoubleLE(offset);
+                offset += SIZE_DOUBLE;
+                this.ymin = gridSectionBuffer.readDoubleLE(offset);
+                offset += SIZE_DOUBLE;
+                let xSize = gridSectionBuffer.readDoubleLE(offset);
+                offset += SIZE_DOUBLE;
+                let ySize = gridSectionBuffer.readDoubleLE(offset);
+                offset += SIZE_DOUBLE;
+
+                this.xmax = this.xmin + (columnCount - 1) * xSize;
+                this.ymax = this.ymin + (rowCount - 1) * ySize;
+
+                // TODO: ? skip zmin, zmax
+                offset += SIZE_DOUBLE;
+                offset += SIZE_DOUBLE;
+
+                this.rotation = gridSectionBuffer.readDoubleLE(offset);
+                offset += SIZE_DOUBLE;
+
+                this.blankValue = gridSectionBuffer.readDoubleLE(offset);
+            }
+            else if (sectionId === SURFER7_SECTION_DATA) {
+                // Data Section
+                // TODO: check that prev section is Grid
+                this.data = new Array();
+                let rowBuffer = Buffer.alloc(columnCount * SIZE_DOUBLE);
+
+                for (let row = 0; row < rowCount; row++) {
+                    let num = fs.readSync(file, rowBuffer, 0, rowBuffer.length, position);
+                    if (num !== columnCount * SIZE_DOUBLE) {
+                        fs.closeSync(file);
+                        throw new Error(`Error reading row ${row}/${rowCount}, unexpected end of file`);
+                    }
+
+                    this.data.push([]);
+                    for (let column = 0; column < columnCount; column++) {
+                        let v = rowBuffer.readDoubleLE(column * SIZE_DOUBLE);
+                        let value = v === this.blankValue ? null : v;
+                        this.data[row].push(value);
+                    }
+
+                    position += columnCount * SIZE_DOUBLE;
+                }
+
+                //position += sectionSize;
+            }
+            else if (sectionId === SURFER7_SECTION_FAULT_INFO) {
+                // Skipping Fault Info Section
+
+                position += sectionSize;
+            }
+            else {
+                throw new Error(`Unknown section Id=${sectionId.toString(16)}`);
+            }
+
+            if (position === fs.statSync(path).size) {
+                break;
+            }
+        }
+
+        return this;
+    }
     else {
-        throw new Error('Unknown file format ' + format);
+        throw new Error(`Unknown file format with "${format}" header`);
     }
 
     return this;
@@ -242,9 +375,7 @@ Grid.prototype.writeSync = function (path, format) {
     }
     else if (format === BINARY_FORMAT_IDENTIFICATION_STRING) {
         const FORMAT_SIZE = 4;
-        const FLOAT_SIZE = 4;
-        const DOUBLE_SIZE = 8;
-        const HeaderSize = 2 * 2 + 6 * DOUBLE_SIZE;
+        const HeaderSize = 2 * 2 + 6 * SIZE_DOUBLE;
 
         let headerBuffer = Buffer.alloc(HeaderSize);
         headerBuffer.writeInt16LE(this.columnCount(), 0);
@@ -252,7 +383,7 @@ Grid.prototype.writeSync = function (path, format) {
         headerBuffer.writeDoubleLE(this.xmin, 4);
         headerBuffer.writeDoubleLE(this.xmax, 12);
         headerBuffer.writeDoubleLE(this.ymin, 20);
-        headerBuffer.writeDoubleLE(this.ymax, 28);
+        headerBuffer.writeDoubleLE(this.ymax, 28); // TODO: use offset variable
         if (minmax.min === null) {
             headerBuffer.writeUInt32LE(NO_DATA_VALUE_HEX, 36);
         }
@@ -271,20 +402,108 @@ Grid.prototype.writeSync = function (path, format) {
         fs.writeSync(file, headerBuffer, 0, headerBuffer.length, 4);
 
         let position = FORMAT_SIZE + HeaderSize;
-        let rowBuffer = Buffer.alloc(this.columnCount() * FLOAT_SIZE);
+        let rowBuffer = Buffer.alloc(this.columnCount() * SIZE_FLOAT);
         for (let row = 0; row < this.rowCount(); row++) {
             for (let column = 0; column < this.columnCount(); column++) {
                 if (this.data[row][column] === null) {
-                    rowBuffer.writeUInt32LE(NO_DATA_VALUE_HEX, column * FLOAT_SIZE);
+                    rowBuffer.writeUInt32LE(NO_DATA_VALUE_HEX, column * SIZE_FLOAT);
                 }
                 else {
-                    rowBuffer.writeFloatLE(Math.fround(this.data[row][column]), column * FLOAT_SIZE);
+                    rowBuffer.writeFloatLE(Math.fround(this.data[row][column]), column * SIZE_FLOAT);
                 }
             }
 
             fs.writeSync(file, rowBuffer, 0, rowBuffer.length, position);
-            position += this.columnCount() * FLOAT_SIZE;
+            position += rowBuffer.length;
         }
+    }
+    else if (format === SURFER7_FORMAT_IDENTIFICATION_STRING) {
+        let position = 0;
+        let offset = 0;
+
+        let headerBuffer = Buffer.alloc(2 * SIZE_LONG + SIZE_LONG);
+        headerBuffer.writeInt32LE(SURFER7_SECTION_HEADER, offset);
+        offset += SIZE_LONG;
+        headerBuffer.writeInt32LE(headerBuffer.length - 2 * SIZE_LONG, offset);
+        offset += SIZE_LONG;
+        headerBuffer.writeInt32LE(2, offset); // TODO: Version support
+        fs.writeSync(file, headerBuffer, 0, headerBuffer.length, position);
+        position += headerBuffer.length;
+
+        offset = 0;
+        let gridBuffer = Buffer.alloc(2 * SIZE_LONG + 2 * SIZE_LONG + 8 * SIZE_DOUBLE);
+        gridBuffer.writeInt32LE(SURFER7_SECTION_GRID, offset);
+        offset += SIZE_LONG;
+        gridBuffer.writeInt32LE(gridBuffer.length - 2 * SIZE_LONG, offset);
+        offset += SIZE_LONG;
+
+        gridBuffer.writeInt32LE(this.rowCount(), offset);
+        offset += SIZE_LONG;
+        gridBuffer.writeInt32LE(this.columnCount(), offset);
+        offset += SIZE_LONG;
+
+        gridBuffer.writeDoubleLE(this.xmin, offset);
+        offset += SIZE_DOUBLE;
+        gridBuffer.writeDoubleLE(this.ymin, offset);
+        offset += SIZE_DOUBLE;
+
+        gridBuffer.writeDoubleLE((this.xmax - this.xmin) / (this.columnCount() - 1), offset);
+        offset += SIZE_DOUBLE;
+        gridBuffer.writeDoubleLE((this.ymax - this.ymin) / (this.rowCount() - 1), offset);
+        offset += SIZE_DOUBLE;
+
+        if (minmax.min === null) {
+            gridBuffer.writeDoubleLE(this.blankValue, offset);
+        }
+        else {
+            gridBuffer.writeDoubleLE(minmax.min, offset);
+        }
+
+        offset += SIZE_DOUBLE;
+
+        if (minmax.max === null) {
+            gridBuffer.writeDoubleLE(this.blankValue, offset);
+        }
+        else {
+            gridBuffer.writeDoubleLE(minmax.max, offset);
+        }
+
+        offset += SIZE_DOUBLE;
+
+        gridBuffer.writeDoubleLE(this.rotation, offset);
+        offset += SIZE_DOUBLE;
+
+        gridBuffer.writeDoubleLE(this.blankValue, offset);
+
+        fs.writeSync(file, gridBuffer, 0, gridBuffer.length, position);
+        position += gridBuffer.length;
+
+        // Data section
+        offset = 0;
+        let dataBuffer = Buffer.alloc(2 * SIZE_LONG);
+        dataBuffer.writeInt32LE(SURFER7_SECTION_DATA, offset);
+        offset += SIZE_LONG;
+        dataBuffer.writeInt32LE(this.rowCount() * this.columnCount() * SIZE_DOUBLE, offset);
+        offset += SIZE_LONG;
+        fs.writeSync(file, dataBuffer, 0, dataBuffer.length, position);
+        position += dataBuffer.length;
+
+        let rowBuffer = Buffer.alloc(this.columnCount() * SIZE_DOUBLE);
+        for (let row = 0; row < this.rowCount(); row++) {
+            for (let column = 0; column < this.columnCount(); column++) {
+                if (this.data[row][column] === null) {
+                    rowBuffer.writeDoubleLE(this.blankValue, column * SIZE_DOUBLE);
+                }
+                else {
+                    rowBuffer.writeDoubleLE(this.data[row][column], column * SIZE_DOUBLE);
+                }
+            }
+
+            fs.writeSync(file, rowBuffer, 0, rowBuffer.length, position);
+            position += rowBuffer.length;
+        }
+
+        // TODO: Fault Info Section
     }
     else {
         fs.closeSync(file);
@@ -326,10 +545,13 @@ Grid.prototype.maximum = function () {
 
 // TODO: ? more grid statistics functions
 
-/** Constant for grid.writeSync(), means Surfer 6 text (ASCII) grid file format. */
+/** Constant for grid.writeSync(), means Surfer 6 text grid file format. */
 Grid.TEXT = TEXT_FORMAT_IDENTIFICATION_STRING;
 
 /** Constant for grid.writeSync(), means Surfer 6 binary grid file format. */
 Grid.BINARY = BINARY_FORMAT_IDENTIFICATION_STRING;
+
+/** Constant for grid.writeSync(), means Surfer 7 grid file format. */
+Grid.SURFER7 = SURFER7_FORMAT_IDENTIFICATION_STRING;
 
 module.exports = Grid;

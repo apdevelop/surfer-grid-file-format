@@ -8,6 +8,9 @@ Surfer 6 grid (.grd) file formats (text and binary) implementation (reading and 
 
 Offline installation from local folder
 
+Run tests
+`npm test`
+
 Run in this repo folder to create tarball package
 `npm pack`
 
@@ -42,10 +45,12 @@ has `null` value, but stored in file as special `NoData` value, `1.70141e+038`.
 
 ### TODOs
 * API improvements.
+* NPM package
+* Surfer 7 format support.
 * Input data validation.
-* Binary format support.
 * Async I/O.
 
 ### References
-* [Surfer 6 Text Grid Format](http://surferhelp.goldensoftware.com/topics/ascii_grid_file_format.htm)
+* [Surfer 6 Text Grid File Format](http://surferhelp.goldensoftware.com/topics/ascii_grid_file_format.htm)
 * [Surfer 6 Binary Grid File Format](http://surferhelp.goldensoftware.com/topics/surfer_6_grid_file_format.htm)
+* [Surfer 7 Grid File Format](http://surferhelp.goldensoftware.com/topics/surfer_7_grid_file_format.htm)
