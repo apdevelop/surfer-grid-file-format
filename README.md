@@ -37,6 +37,7 @@ grid.writeSync('./out.grd', Grid.BINARY);
 
 // Reading from file
 var gridFromFile = new Grid().readSync('./input.grd'); // Chained method call
+console.log(gridFromFile.format); // => 'DSBB' which is Grid.BINARY format constant
 ```
 
 ### API
@@ -45,10 +46,11 @@ has `null` value, but stored in file as special `NoData` value, `1.70141e+038`.
 
 ### TODOs
 * API improvements.
-* NPM package
-* Surfer 7 format support.
+* Asynchronous API.
+* NPM package.
+* API documentation.
+* Full support of Surfer 7 format.
 * Input data validation.
-* Async I/O.
 
 ### References
 * [Surfer 6 Text Grid File Format](http://surferhelp.goldensoftware.com/topics/ascii_grid_file_format.htm)

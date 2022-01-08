@@ -20,7 +20,7 @@ const NO_DATA_VALUE_STRING = '1.70141e+038';
 
 const NO_DATA_VALUE_HEX = 0x7effffee; // NO DATA special value in 32bit floating point format
 
-const NO_DATA_VALUE_DOUBLE_RAW = '47dffffdbd19d02c';
+const NO_DATA_VALUE_DOUBLE_RAW = '2cd019bdfdffdf47'; // NO DATA special value in 64bit floating point format
 
 const SIZE_LONG = 4; // 32 bit signed integer
 
@@ -53,7 +53,6 @@ function Grid(data, xmin, ymin, xmax, ymax, rotation) {
         this.xmax = null;
         this.ymax = null;
         this.rotation = null;
-        this.blankValue = null;
     }
     else {
         // TODO: validate input with messages
@@ -72,8 +71,10 @@ function Grid(data, xmin, ymin, xmax, ymax, rotation) {
         this.xmax = xmax;
         this.ymax = ymax;
         this.rotation = (typeof rotation === 'undefined') ? 0 : rotation;
-        this.blankValue = new Buffer(NO_DATA_VALUE_DOUBLE_RAW, 'hex').readDoubleLE(0);
     }
+
+    this.format = null;
+    this.blankValue = Buffer.from(NO_DATA_VALUE_DOUBLE_RAW, 'hex').readDoubleLE(0);
 }
 
 /** Returns number of grid columns. */
@@ -116,6 +117,150 @@ Grid.prototype.getMinMax = function () {
 }
 
 /** 
+ * Reads grid asynchronously from specified file.
+ * @param path Path to the grid file.
+ * @param callback Callback function with error and result arguments.
+ * */
+Grid.prototype.read = function (path, callback) { // TODO: ? static function
+    const FORMAT_SIZE = 4;
+
+    var self = this;
+    fs.open(path, 'r', function (error, file) {
+        if (error) throw error;
+        let formatBuffer = Buffer.alloc(FORMAT_SIZE);
+        fs.read(file, formatBuffer, 0, formatBuffer.length, 0, function (error, bytesRead) {
+            if (error) throw error;
+
+            self.format = formatBuffer.toString('latin1', 0, formatBuffer.length);
+
+            if (self.format === TEXT_FORMAT_IDENTIFICATION_STRING) {
+                fs.stat(path, function (error, stats) {
+                    if (error) throw error;
+
+                    let dataBuffer = Buffer.alloc(stats.size - FORMAT_SIZE);
+                    fs.read(file, dataBuffer, 0, dataBuffer.length, FORMAT_SIZE, function (error, bytesRead) {
+                        if (error) throw error;
+
+                        let lines = dataBuffer.toString('latin1').split(TEXT_NEWLINE);
+
+                        // TODO: read line by line
+                        // TODO: check input format
+                        let arr = [];
+                        arr = lines[1].trim().split(TEXT_DELIMITER_SPACE_OR_TAB);
+                        let nx = parseInt(arr[0]);
+                        let ny = parseInt(arr[1]);
+                        self.data = new Array();
+
+                        arr = lines[2].trim().split(TEXT_DELIMITER_SPACE_OR_TAB);
+                        self.xmin = parseFloat(arr[0]);
+                        self.xmax = parseFloat(arr[1]);
+
+                        arr = lines[3].trim().split(TEXT_DELIMITER_SPACE_OR_TAB);
+                        self.ymin = parseFloat(arr[0]);
+                        self.ymax = parseFloat(arr[1]);
+                        // TODO: ? skip zmin, zmax
+                        self.rotation = 0;
+
+                        let row = 0;
+                        let column = 0;
+                        for (let i = 5; i < lines.length; i++) {
+                            if (lines[i].length > 0) {
+                                arr = lines[i].trim().split(TEXT_DELIMITER_SPACE_OR_TAB);
+                                // line contains full row or part of row
+                                for (let j = 0; j < arr.length; j++) {
+                                    if (column === 0) {
+                                        self.data.push([]);
+                                    }
+
+                                    let value = arr[j] === NO_DATA_VALUE_STRING ? null : parseFloat(arr[j]);
+
+                                    self.data[row].push(value);
+
+                                    column++;
+
+                                    // Check for next row
+                                    if (column === nx) {
+                                        row++;
+                                        column = 0;
+                                    }
+                                }
+                            }
+                        }
+
+                        fs.close(file, function (error) {
+                            if (error) throw error;
+                            callback(null, self); // Read file completed
+                        });
+                    });
+                })
+            }
+            else if (self.format === BINARY_FORMAT_IDENTIFICATION_STRING) {
+                const HeaderSize = 2 * 2 + 6 * 8;
+
+                // TODO: validate input data
+                let headerBuffer = Buffer.alloc(HeaderSize);
+                fs.read(file, headerBuffer, 0, HeaderSize, FORMAT_SIZE, function (error, bytesRead) {
+                    if (error) throw error;
+
+                    let header = readBinaryHeader(headerBuffer);
+                    let columnCount = header.columnCount;
+                    let rowCount = header.rowCount;
+                    self.xmin = header.xmin;
+                    self.xmax = header.xmax;
+                    self.ymin = header.ymin;
+                    self.ymax = header.ymax;
+                    // TODO: ? skip zmin, zmax
+                    self.rotation = 0;
+
+                    self.data = new Array();
+
+                    let row = 0;
+                    let position = FORMAT_SIZE + HeaderSize;
+                    let rowBuffer = Buffer.alloc(columnCount * SIZE_FLOAT);
+
+                    let readRow = function () {
+                        fs.read(file, rowBuffer, 0, rowBuffer.length, position, function (error, bytesRead, buffer) {
+                            if (error) throw error;
+
+                            if (bytesRead !== buffer.length) {
+                                fs.close(file, function (error) {
+                                    if (error) throw error;
+                                    throw new Error(`Error reading row ${row + 1}/${rowCount}, unexpected end of file`);
+                                });
+                            }
+
+                            self.data.push(readFloatRow(buffer));
+                            position += buffer.length;
+                            row++;
+
+                            if (row < rowCount) {
+                                readRow();
+                            }
+                            else {
+                                fs.close(file, function (error) {
+                                    if (error) throw error;
+                                    callback(null, self); // Read file completed
+                                });
+                            }
+                        });
+                    }
+
+                    readRow();
+                });
+            }
+            else if (this.format === SURFER7_FORMAT_IDENTIFICATION_STRING) {
+                // TODO: ! SURFER7 Async reading
+                throw new Error(`Async reading is not supported for ${SURFER7_FORMAT_IDENTIFICATION_STRING} format`);
+            }
+            else {
+                throw new Error(`Unknown file format with "${self.format}" header`);
+            }
+
+        });
+    });
+}
+
+/** 
  * Reads grid from specified file, returns grid object. 
  * @param path Path to the grid file.
  * */
@@ -125,9 +270,9 @@ Grid.prototype.readSync = function (path) {
     let file = fs.openSync(path, 'r');
     let formatBuffer = Buffer.alloc(FORMAT_SIZE);
     fs.readSync(file, formatBuffer, 0, formatBuffer.length, 0);
-    let format = formatBuffer.toString('latin1', 0, formatBuffer.length);
+    this.format = formatBuffer.toString('latin1', 0, formatBuffer.length);
 
-    if (format === TEXT_FORMAT_IDENTIFICATION_STRING) {
+    if (this.format === TEXT_FORMAT_IDENTIFICATION_STRING) {
         let fileSize = fs.statSync(path).size;
         let dataBuffer = Buffer.alloc(fileSize - FORMAT_SIZE);
         fs.readSync(file, dataBuffer, 0, dataBuffer.length, FORMAT_SIZE);
@@ -181,51 +326,43 @@ Grid.prototype.readSync = function (path) {
 
         fs.closeSync(file);
     }
-    else if (format === BINARY_FORMAT_IDENTIFICATION_STRING) {
+    else if (this.format === BINARY_FORMAT_IDENTIFICATION_STRING) {
         const HeaderSize = 2 * 2 + 6 * 8;
+
+        // TODO: validate input data
 
         let headerBuffer = Buffer.alloc(HeaderSize);
         fs.readSync(file, headerBuffer, 0, HeaderSize, FORMAT_SIZE);
 
-        let columnCount = headerBuffer.readInt16LE(0);
-        let rowCount = headerBuffer.readInt16LE(2);
-        this.data = new Array();
-
-        this.xmin = headerBuffer.readDoubleLE(4);
-        this.xmax = headerBuffer.readDoubleLE(12);
-        this.ymin = headerBuffer.readDoubleLE(20);
-        this.ymax = headerBuffer.readDoubleLE(28);
-
+        let header = readBinaryHeader(headerBuffer);
+        let columnCount = header.columnCount;
+        let rowCount = header.rowCount;
+        this.xmin = header.xmin;
+        this.xmax = header.xmax;
+        this.ymin = header.ymin;
+        this.ymax = header.ymax;
         // TODO: ? skip zmin, zmax
         this.rotation = 0;
+
+        this.data = new Array();
 
         let position = FORMAT_SIZE + HeaderSize;
         let rowBuffer = Buffer.alloc(columnCount * SIZE_FLOAT);
 
-        // TODO: validate input data
         for (let row = 0; row < rowCount; row++) {
-            let num = fs.readSync(file, rowBuffer, 0, rowBuffer.length, position);
-            if (num !== rowBuffer.length) {
+            let bytesRead = fs.readSync(file, rowBuffer, 0, rowBuffer.length, position);
+            if (bytesRead !== rowBuffer.length) {
                 fs.closeSync(file);
-                throw new Error(`Error reading row ${row}/${rowCount}, unexpected end of file`);
+                throw new Error(`Error reading row ${row + 1}/${rowCount}, unexpected end of file`);
             }
 
-            this.data.push([]);
-            for (let column = 0; column < columnCount; column++) {
-                // Avoiding rounding errors when compare
-                let value = rowBuffer.readUInt32LE(column * SIZE_FLOAT) === NO_DATA_VALUE_HEX ?
-                    null :
-                    rowBuffer.readFloatLE(column * SIZE_FLOAT);
-
-                this.data[row].push(value);
-            }
-
+            this.data.push(readFloatRow(rowBuffer));
             position += rowBuffer.length;
         }
 
         fs.closeSync(file);
     }
-    else if (format === SURFER7_FORMAT_IDENTIFICATION_STRING) {
+    else if (this.format === SURFER7_FORMAT_IDENTIFICATION_STRING) {
         let position = FORMAT_SIZE;
 
         // Header Section
@@ -243,7 +380,6 @@ Grid.prototype.readSync = function (path) {
 
         let rowCount = 0;
         let columnCount = 0;
-        this.blankValue = new Buffer(NO_DATA_VALUE_DOUBLE_RAW, 'hex').readDoubleLE(0);
 
         for (; ;) {
             // Each section is preceded by a tag structure
@@ -291,8 +427,8 @@ Grid.prototype.readSync = function (path) {
                 let rowBuffer = Buffer.alloc(columnCount * SIZE_DOUBLE);
 
                 for (let row = 0; row < rowCount; row++) {
-                    let num = fs.readSync(file, rowBuffer, 0, rowBuffer.length, position);
-                    if (num !== columnCount * SIZE_DOUBLE) {
+                    let bytesRead = fs.readSync(file, rowBuffer, 0, rowBuffer.length, position);
+                    if (bytesRead !== columnCount * SIZE_DOUBLE) {
                         fs.closeSync(file);
                         throw new Error(`Error reading row ${row}/${rowCount}, unexpected end of file`);
                     }
@@ -326,10 +462,137 @@ Grid.prototype.readSync = function (path) {
         return this;
     }
     else {
-        throw new Error(`Unknown file format with "${format}" header`);
+        throw new Error(`Unknown file format with "${this.format}" header`);
     }
 
     return this;
+}
+
+const readBinaryHeader = function (headerBuffer) {
+    return {
+        columnCount: headerBuffer.readInt16LE(0),
+        rowCount: headerBuffer.readInt16LE(2),
+        xmin: headerBuffer.readDoubleLE(4),
+        xmax: headerBuffer.readDoubleLE(12),
+        ymin: headerBuffer.readDoubleLE(20),
+        ymax: headerBuffer.readDoubleLE(28)
+    };
+}
+
+const readFloatRow = function (rowBuffer) {
+    let data = [];
+    let columnCount = rowBuffer.length / SIZE_FLOAT;
+    for (let column = 0; column < columnCount; column++) {
+        // Avoiding rounding errors when compare
+        let value = rowBuffer.readUInt32LE(column * SIZE_FLOAT) === NO_DATA_VALUE_HEX ?
+            null :
+            rowBuffer.readFloatLE(column * SIZE_FLOAT);
+
+        data.push(value);
+    }
+
+    return data;
+}
+
+/** 
+ * Writes grid asynchronously to specified file, returns grid object.
+ * @param path Path to the output file.
+ * @param format Output file format, defaults to text format.
+ * */
+Grid.prototype.write = function (path, format, callback) {
+    format = format ? format : TEXT_FORMAT_IDENTIFICATION_STRING;
+    let minmax = this.getMinMax();
+
+    var self = this;
+    fs.open(path, 'w', function (error, file) {
+        if (error) throw error;
+
+        if (format === TEXT_FORMAT_IDENTIFICATION_STRING) {
+            let header = createTextHeader(self, minmax);
+            fs.write(file, header, function (error) {
+                if (error) throw error;
+
+                let row = 0;
+                let writeRow = function () {
+                    let rowLine = '';
+                    for (let column = 0; column < this.columnCount(); column++) {
+                        // Limiting line length - additional newline after 10 values
+                        if (column > 0 && column % 10 === 0) {
+                            rowLine += TEXT_NEWLINE;
+                        }
+
+                        // Optimize writing to file a bit
+                        rowLine += valueToString(this.data[row][column]);
+                        rowLine += TEXT_DELIMITER;
+                    }
+
+                    fs.write(file, rowLine + TEXT_NEWLINE + TEXT_NEWLINE, function () {
+                        if (error) throw error;
+
+                        row++;
+                        if (row < self.rowCount()) {
+                            writeRow();
+                        }
+                        else {
+                            fs.close(file, function (error) {
+                                if (error) throw error;
+                                callback(null, self); // Write file completed
+                            });
+                        }
+                    });
+                }
+
+                writeRow();
+            });
+        }
+        else if (format === BINARY_FORMAT_IDENTIFICATION_STRING) {
+            let header = createBinaryHeader(self, minmax);
+            fs.write(file, header, 0, header.length, 0, function (error) {
+                if (error) throw error;
+
+                let row = 0;
+                let position = header.length;
+                let rowBuffer = Buffer.alloc(self.columnCount() * SIZE_FLOAT);
+
+                let writeRow = function () {
+                    for (let column = 0; column < self.columnCount(); column++) {
+                        if (self.data[row][column] === null) {
+                            rowBuffer.writeUInt32LE(NO_DATA_VALUE_HEX, column * SIZE_FLOAT);
+                        }
+                        else {
+                            rowBuffer.writeFloatLE(Math.fround(self.data[row][column]), column * SIZE_FLOAT);
+                        }
+                    }
+
+                    fs.write(file, rowBuffer, 0, rowBuffer.length, position, function (error) {
+                        if (error) throw error;
+
+                        position += rowBuffer.length;
+                        row++;
+                        if (row < self.rowCount()) {
+                            writeRow();
+                        }
+                        else {
+                            fs.close(file, function (error) {
+                                if (error) throw error;
+                                callback(null, self); // Write file completed
+                            });
+                        }
+                    });
+                }
+
+                writeRow();
+            });
+        }
+        else if (format === SURFER7_FORMAT_IDENTIFICATION_STRING) {
+            // TODO: ! SURFER7 Async writing
+            throw new Error(`Async writing is not supported for ${SURFER7_FORMAT_IDENTIFICATION_STRING} format`);
+        }
+        else {
+            fs.closeSync(file);
+            throw new Error(`Unsupported ${format} format`);
+        }
+    });
 }
 
 /** 
@@ -339,23 +602,10 @@ Grid.prototype.readSync = function (path) {
  * */
 Grid.prototype.writeSync = function (path, format) {
     format = format ? format : TEXT_FORMAT_IDENTIFICATION_STRING;
-
-    let file = fs.openSync(path, 'w');
     let minmax = this.getMinMax();
-
+    let file = fs.openSync(path, 'w');
     if (format === TEXT_FORMAT_IDENTIFICATION_STRING) {
-        const valueToString = function (value) {
-            return value === null ?
-                NO_DATA_VALUE_STRING :
-                Math.fround(value).toString(); // limiting to 32bit float precision
-        }
-
-        // Header - grid size and limits
-        fs.writeSync(file, `${TEXT_FORMAT_IDENTIFICATION_STRING}${TEXT_NEWLINE}`);
-        fs.writeSync(file, `${this.columnCount()}${TEXT_DELIMITER}${this.rowCount()}${TEXT_NEWLINE}`);
-        fs.writeSync(file, `${this.xmin}${TEXT_DELIMITER}${this.xmax}${TEXT_NEWLINE}`);
-        fs.writeSync(file, `${this.ymin}${TEXT_DELIMITER}${this.ymax}${TEXT_NEWLINE}`);
-        fs.writeSync(file, `${valueToString(minmax.min)}${TEXT_DELIMITER}${valueToString(minmax.max)}${TEXT_NEWLINE}`);
+        fs.writeSync(file, createTextHeader(this, minmax));
 
         for (let row = 0; row < this.rowCount(); row++) {
             let rowLine = '';
@@ -374,34 +624,10 @@ Grid.prototype.writeSync = function (path, format) {
         }
     }
     else if (format === BINARY_FORMAT_IDENTIFICATION_STRING) {
-        const FORMAT_SIZE = 4;
-        const HeaderSize = 2 * 2 + 6 * SIZE_DOUBLE;
+        let headerBuffer = createBinaryHeader(this, minmax);
+        fs.writeSync(file, headerBuffer, 0, headerBuffer.length, 0);
 
-        let headerBuffer = Buffer.alloc(HeaderSize);
-        headerBuffer.writeInt16LE(this.columnCount(), 0);
-        headerBuffer.writeInt16LE(this.rowCount(), 2);
-        headerBuffer.writeDoubleLE(this.xmin, 4);
-        headerBuffer.writeDoubleLE(this.xmax, 12);
-        headerBuffer.writeDoubleLE(this.ymin, 20);
-        headerBuffer.writeDoubleLE(this.ymax, 28); // TODO: use offset variable
-        if (minmax.min === null) {
-            headerBuffer.writeUInt32LE(NO_DATA_VALUE_HEX, 36);
-        }
-        else {
-            headerBuffer.writeDoubleLE(minmax.min, 36);
-        }
-
-        if (minmax.max === null) {
-            headerBuffer.writeUInt32LE(NO_DATA_VALUE_HEX, 44);
-        }
-        else {
-            headerBuffer.writeDoubleLE(minmax.max, 44);
-        }
-
-        fs.writeSync(file, BINARY_FORMAT_IDENTIFICATION_STRING, 0, 'latin1');
-        fs.writeSync(file, headerBuffer, 0, headerBuffer.length, 4);
-
-        let position = FORMAT_SIZE + HeaderSize;
+        let position = headerBuffer.length;
         let rowBuffer = Buffer.alloc(this.columnCount() * SIZE_FLOAT);
         for (let row = 0; row < this.rowCount(); row++) {
             for (let column = 0; column < this.columnCount(); column++) {
@@ -513,6 +739,49 @@ Grid.prototype.writeSync = function (path, format) {
     fs.closeSync(file);
 
     return this;
+}
+
+const valueToString = function (value) {
+    return value === null ?
+        NO_DATA_VALUE_STRING :
+        Math.fround(value).toString(); // limiting to 32bit float precision
+}
+
+const createTextHeader = function (grid, minmax) {
+    return `${TEXT_FORMAT_IDENTIFICATION_STRING}${TEXT_NEWLINE}` +
+        `${grid.columnCount()}${TEXT_DELIMITER}${grid.rowCount()}${TEXT_NEWLINE}` +
+        `${grid.xmin}${TEXT_DELIMITER}${grid.xmax}${TEXT_NEWLINE}` +
+        `${grid.ymin}${TEXT_DELIMITER}${grid.ymax}${TEXT_NEWLINE}` +
+        `${valueToString(minmax.min)}${TEXT_DELIMITER}${valueToString(minmax.max)}${TEXT_NEWLINE}`;
+}
+
+const createBinaryHeader = function (grid, minmax) {
+    const FORMAT_SIZE = 4;
+    const HeaderSize = FORMAT_SIZE + 2 * 2 + 6 * SIZE_DOUBLE;
+
+    let headerBuffer = Buffer.alloc(HeaderSize);
+    headerBuffer.write(BINARY_FORMAT_IDENTIFICATION_STRING, 0, 'latin1');
+    headerBuffer.writeInt16LE(grid.columnCount(), 0 + FORMAT_SIZE);
+    headerBuffer.writeInt16LE(grid.rowCount(), 2 + FORMAT_SIZE);
+    headerBuffer.writeDoubleLE(grid.xmin, 4 + FORMAT_SIZE);
+    headerBuffer.writeDoubleLE(grid.xmax, 12 + FORMAT_SIZE);
+    headerBuffer.writeDoubleLE(grid.ymin, 20 + FORMAT_SIZE);
+    headerBuffer.writeDoubleLE(grid.ymax, 28 + FORMAT_SIZE); // TODO: use offset variable
+    if (minmax.min === null) {
+        headerBuffer.writeUInt32LE(NO_DATA_VALUE_HEX, 36 + FORMAT_SIZE);
+    }
+    else {
+        headerBuffer.writeDoubleLE(minmax.min, 36 + FORMAT_SIZE);
+    }
+
+    if (minmax.max === null) {
+        headerBuffer.writeUInt32LE(NO_DATA_VALUE_HEX, 44 + FORMAT_SIZE);
+    }
+    else {
+        headerBuffer.writeDoubleLE(minmax.max, 44 + FORMAT_SIZE);
+    }
+
+    return headerBuffer;
 }
 
 /** Returns number of empty (blanked, no data) nodes in grid. */
